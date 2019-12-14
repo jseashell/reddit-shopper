@@ -2,106 +2,131 @@ const path = require('path');
 const _ = require('lodash');
 const csv = require('csv-parser');
 const fs = require('fs');
-
 const RedditScraper = require('reddit-scraper');
+const Discord = require('discord.js');
 
 const configDir = path.join(__dirname, './config');
+console.log('Configuration location:\n\t> ' + configDir);
+
 const config = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json')));
 
-const Discord = require('discord.js');
-const client = new Discord.Client();
+const redditScraper =
+    new RedditScraper.RedditScraper({
+        AppId: config.reddit_app_id,
+        AppSecret: config.reddit_app_secret,
+    });
 
-console.log('Reddit Shopper');
+/**
+ * Main entry point
+ */
+console.log('Starting reddit-shopper...');
 
-const LOGIN_TOKEN = 'NjUzNzMzNjk4Mjg1NDY5NzU2.Xe7TDA.88_9ek9f7LplBpn0FsUIX0yJPxo';
-client.login(LOGIN_TOKEN);
-
-client.once('ready', () => {
-    console.log('reddit-shopper bot is ready!');
+const discordClient = new Discord.Client();
+discordClient.login(config.discord_login_token);
+console.log('Successfully logged into Discord');
+discordClient.once('ready', () => {
+    console.log('reddit-shopper running!');
 });
 
 // On any message submitted, log it. This is chatty 
-client.on('message', message => {
+discordClient.on('message', message => {
 
-    if (message.content === '!server') {
-        message.channel.send('Server:\t' + message.guild.name + '\n' + message.guild.memberCount + ' total members');
-    }
-    else if (message.content.startsWith('!shop')) {
+    // Regex to match '!shop -command commandArg', where commandArg is optional, and commands that are wrapped in discord markdown are ignored
+    let regex = /^(?:(?![`])!shop (-\S+)(\s.*)?)$/;
+    let match = regex.exec(message.content);
 
-        let splitMessage = _.split(message.content, ' ');
-        let sub = splitMessage[1];
-
-        if (sub == null || sub == undefined || sub == '') {
-            message.channel.send('shop requires an argument, like this `!shop buildapcsales`');
-            return;
+    if (match && match.length > 0) {
+        let messageData = {
+            command: match[1],
+            commandArg: (match[2] || '').trim(),
         }
 
-        const deals = [];
-        fs.createReadStream(path.join(configDir, 'deals.csv'))
-            .pipe(csv())
-            .on('data', (data) => deals.push(data))
-            .on('end', () => {
+        console.log('Received command "' + messageData.command + '" with arg "' + messageData.commandArg + '"');
 
-                console.log('\nSearching for these deals\n\t' + JSON.stringify(deals) + '\non /r/' + sub + '\n');
+        if (messageData.command == '-r') {
+            let sub = messageData.commandArg;
 
-                const redditScraperOptions = {
-                    AppId: config.reddit_app_id,
-                    AppSecret: config.reddit_app_secret,
-                };
+            // Validate that there was a subreddit argument
+            if (sub == null || sub == undefined || sub == '') {
+                let errorMsg = '`' + messageData.command + '` requires a subreddit, like this: `!shop ' + messageData.command + ' buildapcsales`';
+                console.error(errorMsg)
+                message.channel.send(errorMsg);
+                return;
+            }
 
-                const requestOptions = {
-                    Pages: 5,
-                    Records: 25,
-                    SubReddit: sub,
-                    SortType: "new",
-                };
+            // TODO Consier validating subreddit using scrapper error handling
+            // Validate that the sub is word characters only (equivalent to [a-zA-Z0-9_]*)
+            if (/\W/.exec(sub)) {
+                console.error('Received ' + messageData.command + ' with invalid arg "' + messageData.commandArg + '"');
+                message.channel.send('/r/subsifellfor'); // Silly response
+                return;
+            }
 
-                try {
-                    let datas = [];
-                    const redditScraper = new RedditScraper.RedditScraper(redditScraperOptions);
-                    redditScraper
-                        .scrapeData(requestOptions)
-                        .then(function (scrapedData) {
-                            _.forEach(scrapedData, (scrape) => {
-                                let data = scrape.data;
-                                let title = data.title;
-
-                                _.forEach(deals, (deal) => {
-                                    if (title.includes(deal.keyword)) {
-
-                                        let splitTitle = title.split(' ');
-                                        _.forEach(splitTitle, (split) => {
-                                            let regex = new RegExp('^' + deal.keyword + '$');
-                                            let match = split.replace(',', '').match(regex);
-                                            if (match) {
-                                                datas.push(data);
-                                            }
-                                        });
-                                    }
-                                });
-                            });
-
-                            let response = '/r/' + sub + '\n';
-
-                            if (datas.length > 0) {
-
-                                _.forEach(datas, (data) => {
-                                    response += '\t> ' + data.title + '\n';
-                                });
-                            }
-                            else {
-                                response += '\t > No deals found\n';
-                            }
-
-                            message.channel.send(response);
-                        });
-
-                } catch (error) {
-                    console.log(error);
-                }
-            });
-    }
-    else {
-        console.log(message.content);
+            scrapeSub(message.channel, sub);
+        }
     }
 });
+
+/**
+ * Handles '!shop <subreddit>' from discord user
+ * 
+ * @param {Object} channel the channel for sending the response to the discord client
+ * @param {String} sub the subreddit to scrape
+ */
+const scrapeSub = (channel, sub) => {
+    const deals = [];
+    fs.createReadStream(path.join(configDir, 'deals.csv'))
+        .pipe(csv())
+        .on('data', (data) => deals.push(data))
+        .on('end', () => {
+            try {
+                redditScraper
+                    .scrapeData({
+                        /* options */
+                        Pages: 5,
+                        Records: 25,
+                        SubReddit: sub,
+                        SortType: 'new',
+                    })
+                    .then(function (scrapedData) {
+                        let response = buildResponse(sub, scrapedData, deals);
+                        channel.send({
+                            embed: response
+                        });
+                    });
+            } catch (error) {
+                console.log(error);
+            }
+        });
+}
+
+/**
+ * TODO rename this method and give it a good description
+ * 
+ * @param {String} sub the subreddit
+ * @param {Array} scrapedData the scraped reddit data
+ * @param {Array} deals the deals to shop for. should be loaded from persistence layer
+ */
+const buildResponse = (sub, scrapedData, deals) => {
+    let embed = new Discord.RichEmbed()
+        .setTitle('/r/' + sub)
+
+    _.forEach(scrapedData, (scrape) => {
+        _.forEach(deals, (deal) => {
+            if (scrape.data.title.includes(deal.keyword)) {
+                let splitTitle = scrape.data.title.split(' ');
+
+                _.forEach(splitTitle, (split) => {
+                    let regex = new RegExp('^' + deal.keyword + '$');
+
+                    let match = split.replace(',', '').match(regex);
+                    if (match) {
+                        embed.addField(deal.keyword, '[' + scrape.data.title + '](' + scrape.data.url + ')');
+                    }
+                });
+            }
+        });
+    });
+
+    return embed;
+}
