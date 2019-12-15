@@ -1,6 +1,6 @@
 # Reddit Shopper
 
-A scraper capable of monitoring multiple subreddits for posts related to the sale of items with specific price ceilings.
+A scraper capable of monitoring multiple subreddits for specific shopping search terms
 
 ## Table of Contents
 
